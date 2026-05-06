@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Car animation POC — Hungary</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { height: 100vh; width: 100vw; }
+
+    .controls {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 1000;
+      background: white;
+      padding: 10px 12px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 180px;
+    }
+    .controls button {
+      padding: 6px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #f7f7f7;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .controls button:hover { background: #ececec; }
+    .controls label { font-size: 13px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .controls input[type=range] { flex: 1; }
+
+    .car-icon {
+      font-size: 28px;
+      line-height: 28px;
+      text-align: center;
+      transform-origin: center;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4));
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="controls">
+    <strong>Budapest → Debrecen</strong>
+    <button id="play">▶ Play</button>
+    <button id="reset">↺ Reset</button>
+    <label>
+      Speed
+      <input id="speed" type="range" min="0.5" max="5" step="0.5" value="1" />
+      <span id="speedLabel">1×</span>
+    </label>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script>
+    // Fake route across Hungary: Budapest → Debrecen with a few waypoints
+    // so it looks like the car follows a road rather than flying in a straight line.
+    const route = [
+      [47.4979, 19.0402], // Budapest
+      [47.4516, 19.5000],
+      [47.4000, 20.0000],
+      [47.4500, 20.5000],
+      [47.5000, 21.0000],
+      [47.5316, 21.6273], // Debrecen
+    ];
+
+    const map = L.map('map').setView([47.5, 20.3], 8);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors',
+    }).addTo(map);
+
+    L.polyline(route, { color: '#2962ff', weight: 4, opacity: 0.6 }).addTo(map);
+    L.marker(route[0]).addTo(map).bindPopup('A: Budapest');
+    L.marker(route[route.length - 1]).addTo(map).bindPopup('B: Debrecen');
+
+    map.fitBounds(L.latLngBounds(route).pad(0.15));
+
+    // Car icon — a rotatable emoji inside a div
+    const carIcon = L.divIcon({
+      className: '',
+      html: '<div class="car-icon" id="carEl">🚗</div>',
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+    });
+    const carMarker = L.marker(route[0], { icon: carIcon }).addTo(map);
+
+    // --- Animation state ---
+    const SEGMENT_MS_BASE = 2500; // base time to traverse one segment at 1×
+    let speedMultiplier = 1;
+    let animationId = null;
+    let segmentIndex = 0;
+    let segmentStart = null;
+    let playing = false;
+
+    function bearing(a, b) {
+      const toRad = d => d * Math.PI / 180;
+      const toDeg = r => r * 180 / Math.PI;
+      const lat1 = toRad(a[0]), lat2 = toRad(b[0]);
+      const dLng = toRad(b[1] - a[1]);
+      const y = Math.sin(dLng) * Math.cos(lat2);
+      const x = Math.cos(lat1) * Math.sin(lat2) -
+                Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+      // 0° = north, clockwise. Emoji car points right (east), so subtract 90°.
+      return (toDeg(Math.atan2(y, x)) - 90 + 360) % 360;
+    }
+
+    function setCarRotation(deg) {
+      const el = document.getElementById('carEl');
+      if (el) el.style.transform = `rotate(${deg}deg)`;
+    }
+
+    function lerp(a, b, t) {
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    }
+
+    function step(timestamp) {
+      if (!playing) return;
+      if (segmentStart === null) segmentStart = timestamp;
+
+      const a = route[segmentIndex];
+      const b = route[segmentIndex + 1];
+      const duration = SEGMENT_MS_BASE / speedMultiplier;
+      const t = Math.min((timestamp - segmentStart) / duration, 1);
+
+      const pos = lerp(a, b, t);
+      carMarker.setLatLng(pos);
+      setCarRotation(bearing(a, b));
+
+      if (t >= 1) {
+        segmentIndex++;
+        segmentStart = timestamp;
+        if (segmentIndex >= route.length - 1) {
+          playing = false;
+          document.getElementById('play').textContent = '▶ Play';
+          return;
+        }
+      }
+
+      animationId = requestAnimationFrame(step);
+    }
+
+    function play() {
+      if (segmentIndex >= route.length - 1) reset();
+      playing = true;
+      segmentStart = null;
+      document.getElementById('play').textContent = '⏸ Pause';
+      animationId = requestAnimationFrame(step);
+    }
+
+    function pause() {
+      playing = false;
+      cancelAnimationFrame(animationId);
+      document.getElementById('play').textContent = '▶ Play';
+    }
+
+    function reset() {
+      pause();
+      segmentIndex = 0;
+      segmentStart = null;
+      carMarker.setLatLng(route[0]);
+      setCarRotation(bearing(route[0], route[1]));
+    }
+
+    document.getElementById('play').addEventListener('click', () => {
+      playing ? pause() : play();
+    });
+    document.getElementById('reset').addEventListener('click', reset);
+    document.getElementById('speed').addEventListener('input', (e) => {
+      speedMultiplier = parseFloat(e.target.value);
+      document.getElementById('speedLabel').textContent = speedMultiplier + '×';
+      // Reset segmentStart so the new speed applies smoothly from "now".
+      if (playing) segmentStart = null;
+    });
+
+    // Initial heading
+    setCarRotation(bearing(route[0], route[1]));
+  </script>
+</body>
+</html>
