@@ -13,6 +13,7 @@ an "influencer" travel toward their city.
 | [`google.html`](./google.html) | Same animation on Google Maps. |
 | [`time-snapshot.html`](./time-snapshot.html) | **Closest to production:** car position is derived from real clock time (`departureTime` → `arrivalTime`). Reload the page and the car is exactly where it should be based on `Date.now()`. |
 | [`directions.html`](./directions.html) | Same time-based logic, but the route polyline is fetched from the Google **Directions API** so the path snaps to real roads. Requires Directions API enabled on the key (the public demo key only allows Maps JS API, so this page will show an error with the demo key). |
+| [`clustering.html`](./clustering.html) | Marker clustering with `@googlemaps/markerclusterer`. ~300 markers around Hungarian cities. Toggle clustering on/off and change marker density to compare. |
 
 ## Notes for production
 

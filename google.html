@@ -79,6 +79,7 @@
       <a href="index.html">← Leaflet/OSM version</a>
       <a href="time-snapshot.html">Time-based snapshot →</a>
       <a href="directions.html">Snap-to-road →</a>
+      <a href="clustering.html">Marker clustering →</a>
     </div>
   </div>
 
@@ -127,6 +128,7 @@
     // Car shape SVG path, pointing UP (north) when rotation = 0.
     const CAR_PATH = 'M 0 -12 L 6 -8 L 6 8 L 4 12 L -4 12 L -6 8 L -6 -8 Z';
 
+    // mobil vagy desktop, felbontas stbsbtsbtbstbtsb
     function initMap() {
       map = new google.maps.Map(document.getElementById('map'), {
         center: { lat: 47.5, lng: 20.3 },
@@ -145,6 +147,7 @@
         strokeWeight: 4,
       });
 
+      // jdfjhglkjhdflgkd
       new google.maps.Marker({ position: path[0], map, label: 'A' });
       new google.maps.Marker({ position: path[path.length - 1], map, label: 'B' });
 

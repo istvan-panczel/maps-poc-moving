@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POC 4 — Marker clustering (Google Maps)</title>
+
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { height: 100vh; width: 100vw; }
+
+    .controls {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 5;
+      background: white;
+      padding: 12px 14px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 240px;
+      font-size: 13px;
+    }
+    .controls h3 { margin: 0; font-size: 14px; }
+    .controls .info { color: #555; line-height: 1.5; }
+    .controls label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .controls input[type=number] {
+      width: 80px;
+      padding: 3px 6px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    .controls button {
+      padding: 6px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #f7f7f7;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .controls button:hover { background: #ececec; }
+    .controls a { color: #2962ff; text-decoration: none; font-size: 12px; }
+    .controls .nav { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px solid #eee; }
+  </style>
+
+  <script src="https://unpkg.com/@googlemaps/markerclusterer/dist/index.min.js"></script>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="controls">
+    <h3>📍 Marker clustering</h3>
+    <div class="info">
+      <b id="markerCount">0</b> markers around Hungarian cities.<br>
+      Zoom in / out to see clusters expand and collapse. Click a cluster to
+      zoom into it.
+    </div>
+
+    <label>
+      <input type="checkbox" id="clusterToggle" checked>
+      Clustering enabled
+    </label>
+
+    <label>
+      Markers per city:
+      <input type="number" id="perCityInput" min="1" max="500" value="30">
+    </label>
+    <button id="regenerate">↺ Regenerate markers</button>
+
+    <div class="nav">
+      <a href="index.html">← All POCs</a>
+      <a href="google.html">Basic Google Maps anim</a>
+      <a href="time-snapshot.html">Time-based snapshot</a>
+      <a href="directions.html">Snap-to-road</a>
+    </div>
+  </div>
+
+  <script>
+    const GOOGLE_MAPS_API_KEY = 'AIzaSyB2566plXtC1Aedw8pyJw4qjw114x_QsSg';
+
+    // Hungarian cities (centers we cluster markers around).
+    // In production these would be your meetup locations / influencer pin coords.
+    const CITIES = [
+      { name: 'Budapest',     center: [47.4979, 19.0402], spread: 0.12 },
+      { name: 'Debrecen',     center: [47.5316, 21.6273], spread: 0.06 },
+      { name: 'Szeged',       center: [46.2530, 20.1414], spread: 0.06 },
+      { name: 'Miskolc',      center: [48.1035, 20.7784], spread: 0.06 },
+      { name: 'Pécs',         center: [46.0727, 18.2330], spread: 0.06 },
+      { name: 'Győr',         center: [47.6875, 17.6504], spread: 0.06 },
+      { name: 'Nyíregyháza',  center: [47.9554, 21.7167], spread: 0.05 },
+      { name: 'Kecskemét',    center: [46.9077, 19.6914], spread: 0.05 },
+      { name: 'Székesfehérvár',center:[47.1860, 18.4221], spread: 0.05 },
+      { name: 'Szombathely',  center: [47.2306, 16.6219], spread: 0.05 },
+    ];
+
+    let map;
+    let markers = [];
+    let clusterer = null;
+
+    function generateMarkers(perCity) {
+      // Clean up old markers/clusterer before regenerating.
+      if (clusterer) { clusterer.clearMarkers(); clusterer = null; }
+      markers.forEach(m => m.setMap(null));
+      markers = [];
+
+      CITIES.forEach(city => {
+        for (let i = 0; i < perCity; i++) {
+          // Roughly uniform in a box around the city center.
+          const lat = city.center[0] + (Math.random() - 0.5) * city.spread;
+          const lng = city.center[1] + (Math.random() - 0.5) * city.spread;
+          const marker = new google.maps.Marker({
+            position: { lat, lng },
+            title: `${city.name} — point #${i + 1}`,
+          });
+          markers.push(marker);
+        }
+      });
+
+      document.getElementById('markerCount').textContent = markers.length;
+      applyClusteringSetting();
+    }
+
+    function applyClusteringSetting() {
+      const enabled = document.getElementById('clusterToggle').checked;
+      if (enabled) {
+        markers.forEach(m => m.setMap(null));
+        clusterer = new markerClusterer.MarkerClusterer({ map, markers });
+      } else {
+        if (clusterer) { clusterer.clearMarkers(); clusterer = null; }
+        markers.forEach(m => m.setMap(map));
+      }
+    }
+
+    function initMap() {
+      map = new google.maps.Map(document.getElementById('map'), {
+        // Center on roughly the middle of Hungary.
+        center: { lat: 47.2, lng: 19.5 },
+        zoom: 7,
+        mapTypeControl: false,
+        streetViewControl: false,
+      });
+
+      const perCity = parseInt(document.getElementById('perCityInput').value, 10);
+      generateMarkers(perCity);
+
+      document.getElementById('clusterToggle').addEventListener('change', applyClusteringSetting);
+      document.getElementById('regenerate').addEventListener('click', () => {
+        const n = Math.max(1, Math.min(500, parseInt(document.getElementById('perCityInput').value, 10) || 30));
+        generateMarkers(n);
+      });
+    }
+
+    window.initMap = initMap;
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&callback=initMap&loading=async`;
+    s.async = true; s.defer = true;
+    document.head.appendChild(s);
+  </script>
+</body>
+</html>
