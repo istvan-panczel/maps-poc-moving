@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POC 3 — Snap-to-road (Google Directions API)</title>
+
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { height: 100vh; width: 100vw; }
+
+    .controls {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 5;
+      background: white;
+      padding: 12px 14px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 240px;
+      font-size: 13px;
+    }
+    .controls h3 { margin: 0; font-size: 14px; }
+    .controls .info { color: #333; line-height: 1.5; }
+    .controls button {
+      padding: 6px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #f7f7f7;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .controls button:hover { background: #ececec; }
+    .controls a { color: #2962ff; text-decoration: none; font-size: 12px; }
+    .controls .nav { display: flex; justify-content: space-between; }
+    .progress {
+      height: 6px;
+      background: #eee;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress > div {
+      height: 100%;
+      background: #00897b;
+      width: 0%;
+      transition: width 0.2s linear;
+    }
+    .err {
+      background: #fff3e0;
+      border: 1px solid #ffb74d;
+      padding: 8px;
+      border-radius: 6px;
+      color: #6d4c00;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="controls">
+    <h3>🎤 Influencer: Budapest → Pécs</h3>
+    <div style="font-size:11px;color:#666">Route follows real roads (Directions API)</div>
+    <div class="info" id="info">Loading directions…</div>
+    <div class="progress"><div id="progressBar"></div></div>
+    <button id="restart">↺ Restart trip</button>
+    <div class="nav">
+      <a href="time-snapshot.html">← Straight lines</a>
+      <a href="index.html">All POCs</a>
+    </div>
+  </div>
+
+  <script>
+    const GOOGLE_MAPS_API_KEY = 'AIzaSyB2566plXtC1Aedw8pyJw4qjw114x_QsSg';
+
+    const ORIGIN = { lat: 47.4979, lng: 19.0402 };       // Budapest
+    const DESTINATION = { lat: 46.0727, lng: 18.2330 };  // Pécs
+
+    const TRIP_DURATION_MS = 5 * 60 * 1000;
+    const DEPARTED_OFFSET_MS = -60 * 1000;
+    let departureTime = Date.now() + DEPARTED_OFFSET_MS;
+    let arrivalTime = departureTime + TRIP_DURATION_MS;
+
+    let map, carMarker;
+    let routeCoords = [];     // [[lat, lng], …] from Directions API
+    let segmentLengths = [];
+    let totalLength = 0;
+
+    function haversine(a, b) {
+      const R = 6371000;
+      const toRad = d => d * Math.PI / 180;
+      const dLat = toRad(b[0] - a[0]);
+      const dLng = toRad(b[1] - a[1]);
+      const lat1 = toRad(a[0]);
+      const lat2 = toRad(b[0]);
+      const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    }
+    function bearing(a, b) {
+      const toRad = d => d * Math.PI / 180;
+      const toDeg = r => r * 180 / Math.PI;
+      const lat1 = toRad(a[0]), lat2 = toRad(b[0]);
+      const dLng = toRad(b[1] - a[1]);
+      const y = Math.sin(dLng) * Math.cos(lat2);
+      const x = Math.cos(lat1) * Math.sin(lat2) -
+                Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+      return (toDeg(Math.atan2(y, x)) + 360) % 360;
+    }
+
+    function precomputeLengths(coords) {
+      segmentLengths = [];
+      totalLength = 0;
+      for (let i = 0; i < coords.length - 1; i++) {
+        const d = haversine(coords[i], coords[i+1]);
+        segmentLengths.push(d);
+        totalLength += d;
+      }
+    }
+    function positionAtProgress(progress, coords) {
+      if (progress <= 0) return { lat: coords[0][0], lng: coords[0][1], heading: bearing(coords[0], coords[1]) };
+      if (progress >= 1) {
+        const i = coords.length - 1;
+        return { lat: coords[i][0], lng: coords[i][1], heading: bearing(coords[i-1], coords[i]) };
+      }
+      const target = progress * totalLength;
+      let acc = 0;
+      for (let i = 0; i < segmentLengths.length; i++) {
+        if (acc + segmentLengths[i] >= target) {
+          const segT = (target - acc) / segmentLengths[i];
+          const a = coords[i], b = coords[i+1];
+          return {
+            lat: a[0] + (b[0] - a[0]) * segT,
+            lng: a[1] + (b[1] - a[1]) * segT,
+            heading: bearing(a, b),
+          };
+        }
+        acc += segmentLengths[i];
+      }
+    }
+
+    function getProgress() {
+      const t = (Date.now() - departureTime) / (arrivalTime - departureTime);
+      return Math.max(0, Math.min(1, t));
+    }
+    function fmtTime(ms) {
+      return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtDuration(ms) {
+      const s = Math.max(0, Math.round(ms / 1000));
+      const m = Math.floor(s / 60), r = s % 60;
+      return m > 0 ? `${m}m ${r}s` : `${r}s`;
+    }
+    function setCar(lat, lng, heading) {
+      carMarker.setPosition({ lat, lng });
+      const icon = carMarker.getIcon();
+      icon.rotation = heading;
+      carMarker.setIcon(icon);
+    }
+
+    function tick() {
+      const progress = getProgress();
+      const pos = positionAtProgress(progress, routeCoords);
+      setCar(pos.lat, pos.lng, pos.heading);
+
+      const remaining = Math.max(0, arrivalTime - Date.now());
+      const remainingKm = Math.round((1 - progress) * totalLength / 100) / 10;
+      const totalKm = Math.round(totalLength / 100) / 10;
+      document.getElementById('info').innerHTML = `
+        Total route: <b>${totalKm} km</b> (real roads)<br>
+        Departed: <b>${fmtTime(departureTime)}</b><br>
+        ETA: <b>${fmtTime(arrivalTime)}</b><br>
+        ${progress >= 1
+          ? '✅ <b>Arrived!</b>'
+          : `Remaining: <b>${fmtDuration(remaining)}</b> · ~${remainingKm} km`}
+      `;
+      document.getElementById('progressBar').style.width = `${progress * 100}%`;
+
+      if (progress < 1) requestAnimationFrame(tick);
+    }
+
+    const CAR_PATH = 'M 0 -12 L 6 -8 L 6 8 L 4 12 L -4 12 L -6 8 L -6 -8 Z';
+
+    function showError(msg) {
+      const info = document.getElementById('info');
+      info.innerHTML = `<div class="err">${msg}</div>`;
+    }
+
+    function initMap() {
+      map = new google.maps.Map(document.getElementById('map'), {
+        center: { lat: 46.8, lng: 18.7 },
+        zoom: 8,
+        mapTypeControl: false,
+        streetViewControl: false,
+      });
+
+      new google.maps.Marker({ position: ORIGIN, map, label: 'A' });
+      new google.maps.Marker({ position: DESTINATION, map, label: 'B' });
+
+      const ds = new google.maps.DirectionsService();
+      ds.route({
+        origin: ORIGIN,
+        destination: DESTINATION,
+        travelMode: google.maps.TravelMode.DRIVING,
+      }, (result, status) => {
+        if (status !== 'OK') {
+          showError(`
+            Directions API call failed: <b>${status}</b>.<br><br>
+            The Google demo key probably doesn't allow the Directions API
+            (only Maps JavaScript API). To make this POC work, generate your
+            own key in Google Cloud Console and enable <b>Directions API</b>
+            on it (plus billing).
+          `);
+          return;
+        }
+
+        // Flatten all steps' detailed paths into one coordinate array.
+        // (overview_path is decimated; legs[].steps[].path is the full geometry.)
+        routeCoords = [];
+        result.routes[0].legs.forEach(leg => {
+          leg.steps.forEach(step => {
+            step.path.forEach(p => routeCoords.push([p.lat(), p.lng()]));
+          });
+        });
+
+        precomputeLengths(routeCoords);
+
+        new google.maps.Polyline({
+          path: routeCoords.map(([lat, lng]) => ({ lat, lng })),
+          map,
+          strokeColor: '#00897b', strokeOpacity: 0.7, strokeWeight: 5,
+        });
+
+        const bounds = new google.maps.LatLngBounds();
+        routeCoords.forEach(([lat, lng]) => bounds.extend({ lat, lng }));
+        map.fitBounds(bounds, 80);
+
+        carMarker = new google.maps.Marker({
+          position: { lat: routeCoords[0][0], lng: routeCoords[0][1] },
+          map,
+          icon: {
+            path: CAR_PATH,
+            fillColor: '#e53935', fillOpacity: 1,
+            strokeColor: '#1a1a1a', strokeWeight: 1,
+            scale: 1.2, rotation: 0,
+            anchor: new google.maps.Point(0, 0),
+          },
+        });
+
+        tick();
+      });
+
+      document.getElementById('restart').addEventListener('click', () => {
+        departureTime = Date.now() + DEPARTED_OFFSET_MS;
+        arrivalTime = departureTime + TRIP_DURATION_MS;
+        if (routeCoords.length) tick();
+      });
+    }
+
+    window.initMap = initMap;
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&callback=initMap&loading=async`;
+    s.async = true; s.defer = true;
+    document.head.appendChild(s);
+  </script>
+</body>
+</html>

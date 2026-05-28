@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POC 2 — Time-based snapshot (Google Maps)</title>
+
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { height: 100vh; width: 100vw; }
+
+    .controls {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 5;
+      background: white;
+      padding: 12px 14px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 240px;
+      font-size: 13px;
+    }
+    .controls h3 { margin: 0; font-size: 14px; }
+    .controls .info { color: #333; line-height: 1.5; }
+    .controls button {
+      padding: 6px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #f7f7f7;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .controls button:hover { background: #ececec; }
+    .controls a { color: #2962ff; text-decoration: none; font-size: 12px; }
+    .controls .nav { display: flex; justify-content: space-between; }
+    .progress {
+      height: 6px;
+      background: #eee;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress > div {
+      height: 100%;
+      background: #2962ff;
+      width: 0%;
+      transition: width 0.2s linear;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="controls">
+    <h3>🎤 Influencer: Budapest → Pécs</h3>
+    <div class="info" id="info">Loading…</div>
+    <div class="progress"><div id="progressBar"></div></div>
+    <button id="restart">↺ Restart trip (simulate fresh page load later)</button>
+    <div class="nav">
+      <a href="google.html">← Basic anim</a>
+      <a href="directions.html">Snap-to-road →</a>
+    </div>
+  </div>
+
+  <script>
+    const GOOGLE_MAPS_API_KEY = 'AIzaSyB2566plXtC1Aedw8pyJw4qjw114x_QsSg';
+
+    // Trip route: Budapest → Pécs with a few intermediate waypoints (fake).
+    // In production this would come from your PHP backend per influencer.
+    const route = [
+      [47.4979, 19.0402], // Budapest
+      [47.2000, 18.8500],
+      [46.9000, 18.6000],
+      [46.5000, 18.3500],
+      [46.0727, 18.2330], // Pécs
+    ];
+
+    // Trip timing: simulate that the influencer left 1 min ago and arrives in 4 min.
+    // POC value: short enough to watch end-to-end, long enough to demo "snapshot on reload".
+    // In production these would be ISO timestamps from your backend.
+    const TRIP_DURATION_MS = 5 * 60 * 1000;
+    const DEPARTED_OFFSET_MS = -60 * 1000;
+    let departureTime = Date.now() + DEPARTED_OFFSET_MS;
+    let arrivalTime = departureTime + TRIP_DURATION_MS;
+
+    let map, carMarker;
+    let segmentLengths = [];
+    let totalLength = 0;
+
+    function haversine(a, b) {
+      const R = 6371000;
+      const toRad = d => d * Math.PI / 180;
+      const dLat = toRad(b[0] - a[0]);
+      const dLng = toRad(b[1] - a[1]);
+      const lat1 = toRad(a[0]);
+      const lat2 = toRad(b[0]);
+      const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    }
+
+    function bearing(a, b) {
+      const toRad = d => d * Math.PI / 180;
+      const toDeg = r => r * 180 / Math.PI;
+      const lat1 = toRad(a[0]), lat2 = toRad(b[0]);
+      const dLng = toRad(b[1] - a[1]);
+      const y = Math.sin(dLng) * Math.cos(lat2);
+      const x = Math.cos(lat1) * Math.sin(lat2) -
+                Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+      return (toDeg(Math.atan2(y, x)) + 360) % 360;
+    }
+
+    function precomputeLengths(coords) {
+      segmentLengths = [];
+      totalLength = 0;
+      for (let i = 0; i < coords.length - 1; i++) {
+        const d = haversine(coords[i], coords[i+1]);
+        segmentLengths.push(d);
+        totalLength += d;
+      }
+    }
+
+    // Given progress (0..1), find the lat/lng/heading along the polyline at that
+    // fraction of total *distance* (not point count — gives correct speed feel).
+    function positionAtProgress(progress, coords) {
+      if (progress <= 0) {
+        return { lat: coords[0][0], lng: coords[0][1], heading: bearing(coords[0], coords[1]) };
+      }
+      if (progress >= 1) {
+        const last = coords.length - 1;
+        return { lat: coords[last][0], lng: coords[last][1], heading: bearing(coords[last-1], coords[last]) };
+      }
+
+      const target = progress * totalLength;
+      let acc = 0;
+      for (let i = 0; i < segmentLengths.length; i++) {
+        if (acc + segmentLengths[i] >= target) {
+          const segT = (target - acc) / segmentLengths[i];
+          const a = coords[i], b = coords[i+1];
+          return {
+            lat: a[0] + (b[0] - a[0]) * segT,
+            lng: a[1] + (b[1] - a[1]) * segT,
+            heading: bearing(a, b),
+          };
+        }
+        acc += segmentLengths[i];
+      }
+    }
+
+    function getProgress() {
+      const now = Date.now();
+      const elapsed = now - departureTime;
+      const total = arrivalTime - departureTime;
+      return Math.max(0, Math.min(1, elapsed / total));
+    }
+
+    function fmtTime(ms) {
+      return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtDuration(ms) {
+      const s = Math.max(0, Math.round(ms / 1000));
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return m > 0 ? `${m}m ${r}s` : `${r}s`;
+    }
+
+    function setCar(lat, lng, heading) {
+      carMarker.setPosition({ lat, lng });
+      const icon = carMarker.getIcon();
+      icon.rotation = heading;
+      carMarker.setIcon(icon);
+    }
+
+    function tick() {
+      const progress = getProgress();
+      const pos = positionAtProgress(progress, route);
+      setCar(pos.lat, pos.lng, pos.heading);
+
+      const remaining = Math.max(0, arrivalTime - Date.now());
+      const remainingKm = Math.round((1 - progress) * totalLength / 100) / 10;
+      const info = document.getElementById('info');
+      info.innerHTML = `
+        Departed: <b>${fmtTime(departureTime)}</b><br>
+        ETA: <b>${fmtTime(arrivalTime)}</b><br>
+        ${progress >= 1
+          ? '✅ <b>Arrived!</b>'
+          : `Remaining: <b>${fmtDuration(remaining)}</b> · ~${remainingKm} km`}
+      `;
+      document.getElementById('progressBar').style.width = `${progress * 100}%`;
+
+      if (progress < 1) requestAnimationFrame(tick);
+    }
+
+    const CAR_PATH = 'M 0 -12 L 6 -8 L 6 8 L 4 12 L -4 12 L -6 8 L -6 -8 Z';
+
+    function initMap() {
+      map = new google.maps.Map(document.getElementById('map'), {
+        center: { lat: 46.8, lng: 18.7 },
+        zoom: 8,
+        mapTypeControl: false,
+        streetViewControl: false,
+      });
+
+      precomputeLengths(route);
+
+      const path = route.map(([lat, lng]) => ({ lat, lng }));
+
+      new google.maps.Polyline({
+        path, map,
+        strokeColor: '#2962ff', strokeOpacity: 0.6, strokeWeight: 4,
+      });
+
+      new google.maps.Marker({ position: path[0], map, label: 'A' });
+      new google.maps.Marker({ position: path[path.length-1], map, label: 'B' });
+
+      const bounds = new google.maps.LatLngBounds();
+      path.forEach(p => bounds.extend(p));
+      map.fitBounds(bounds, 80);
+
+      carMarker = new google.maps.Marker({
+        position: path[0],
+        map,
+        icon: {
+          path: CAR_PATH,
+          fillColor: '#e53935', fillOpacity: 1,
+          strokeColor: '#1a1a1a', strokeWeight: 1,
+          scale: 1.2, rotation: 0,
+          anchor: new google.maps.Point(0, 0),
+        },
+      });
+
+      document.getElementById('restart').addEventListener('click', () => {
+        departureTime = Date.now() + DEPARTED_OFFSET_MS;
+        arrivalTime = departureTime + TRIP_DURATION_MS;
+        tick();
+      });
+
+      tick();
+    }
+
+    window.initMap = initMap;
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&callback=initMap&loading=async`;
+    s.async = true; s.defer = true;
+    document.head.appendChild(s);
+  </script>
+</body>
+</html>
