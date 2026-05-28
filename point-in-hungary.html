@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POC — Is this point inside Hungary?</title>
+
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { height: 100vh; width: 100vw; }
+
+    .panel {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 5;
+      background: white;
+      padding: 14px 16px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 280px;
+      max-width: 320px;
+      font-size: 13px;
+    }
+    .panel h3 { margin: 0; font-size: 15px; }
+    .panel .hint { color: #666; font-size: 12px; line-height: 1.4; }
+
+    .inputs { display: flex; gap: 8px; align-items: end; }
+    .inputs .field { display: flex; flex-direction: column; flex: 1; }
+    .inputs label { font-size: 11px; color: #666; margin-bottom: 2px; }
+    .inputs input {
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 14px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .inputs button {
+      padding: 7px 12px;
+      border: none;
+      border-radius: 4px;
+      background: #2962ff;
+      color: white;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .result {
+      padding: 14px;
+      border-radius: 8px;
+      text-align: center;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .result.inside  { background: #e8f5e9; color: #1b5e20; border: 1px solid #66bb6a; }
+    .result.outside { background: #ffebee; color: #b71c1c; border: 1px solid #ef5350; }
+    .result.loading { background: #f5f5f5; color: #666; font-weight: 400; }
+    .result.error   { background: #fff3e0; color: #6d4c00; border: 1px solid #ffb74d; font-weight: 400; font-size: 13px; text-align: left; }
+
+    .examples { display: flex; flex-wrap: wrap; gap: 6px; }
+    .examples button {
+      padding: 4px 10px;
+      border: 1px solid #ccc;
+      border-radius: 14px;
+      background: #f7f7f7;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .examples button:hover { background: #ececec; }
+
+    .nav { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid #eee; font-size: 12px; }
+    .nav a { color: #2962ff; text-decoration: none; }
+  </style>
+
+  <script src="https://unpkg.com/@turf/turf@7.1.0/turf.min.js"></script>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="panel">
+    <h3>🇭🇺 Point-in-Hungary check</h3>
+    <div class="hint">
+      Type coordinates, click "Check", or just click anywhere on the map.
+    </div>
+
+    <div class="inputs">
+      <div class="field">
+        <label>Latitude</label>
+        <input id="latInput" type="number" step="0.0001" value="47.4979">
+      </div>
+      <div class="field">
+        <label>Longitude</label>
+        <input id="lngInput" type="number" step="0.0001" value="19.0402">
+      </div>
+      <button id="checkBtn">Check</button>
+    </div>
+
+    <div class="result loading" id="result">Loading Hungary boundary…</div>
+
+    <div>
+      <div style="font-size:11px;color:#666;margin-bottom:6px">Quick examples:</div>
+      <div class="examples" id="examples"></div>
+    </div>
+
+    <div class="nav">
+      <a href="index.html">← All POCs</a>
+    </div>
+  </div>
+
+  <script>
+    const GOOGLE_MAPS_API_KEY = 'AIzaSyB2566plXtC1Aedw8pyJw4qjw114x_QsSg';
+
+    const EXAMPLES = [
+      { name: 'Budapest',    lat: 47.4979, lng: 19.0402, expect: true  },
+      { name: 'Debrecen',    lat: 47.5316, lng: 21.6273, expect: true  },
+      { name: 'Pécs',        lat: 46.0727, lng: 18.2330, expect: true  },
+      { name: 'Vienna',      lat: 48.2082, lng: 16.3738, expect: false },
+      { name: 'Bratislava',  lat: 48.1486, lng: 17.1077, expect: false },
+      { name: 'Bucharest',   lat: 44.4268, lng: 26.1025, expect: false },
+      { name: 'Zagreb',      lat: 45.8150, lng: 15.9819, expect: false },
+      { name: 'Lake Balaton',lat: 46.8417, lng: 17.7297, expect: true  },
+    ];
+
+    let map;
+    let marker = null;
+    let hungaryFeature = null;
+
+    function setResult(state, html) {
+      const el = document.getElementById('result');
+      el.className = `result ${state}`;
+      el.innerHTML = html;
+    }
+
+    async function loadHungaryGeoJson() {
+      // Hungary's national boundary from a public CDN-hosted dataset.
+      // jsdelivr serves files straight from GitHub with proper CORS.
+      const url = 'https://cdn.jsdelivr.net/gh/glynnbird/countriesgeojson@master/hungary.geojson';
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const geo = await resp.json();
+      // The file is a Feature; some files are FeatureCollection — handle both.
+      return geo.type === 'FeatureCollection' ? geo.features[0] : geo;
+    }
+
+    function checkPoint(lat, lng) {
+      if (!hungaryFeature) return;
+
+      // Move/create the marker.
+      if (marker) {
+        marker.setPosition({ lat, lng });
+      } else {
+        marker = new google.maps.Marker({ position: { lat, lng }, map });
+      }
+
+      // Turf.js expects [lng, lat] order (GeoJSON convention).
+      const pt = turf.point([lng, lat]);
+      const inside = turf.booleanPointInPolygon(pt, hungaryFeature);
+
+      const coordStr = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+      if (inside) {
+        setResult('inside', `✅ Inside Hungary<br><span style="font-weight:400;font-size:12px;opacity:0.8">${coordStr}</span>`);
+      } else {
+        setResult('outside', `❌ Outside Hungary<br><span style="font-weight:400;font-size:12px;opacity:0.8">${coordStr}</span>`);
+      }
+    }
+
+    function checkFromInputs() {
+      const lat = parseFloat(document.getElementById('latInput').value);
+      const lng = parseFloat(document.getElementById('lngInput').value);
+      if (Number.isNaN(lat) || Number.isNaN(lng)) {
+        setResult('error', 'Enter valid numeric lat and lng.');
+        return;
+      }
+      checkPoint(lat, lng);
+      map.panTo({ lat, lng });
+    }
+
+    function loadExample(ex) {
+      document.getElementById('latInput').value = ex.lat;
+      document.getElementById('lngInput').value = ex.lng;
+      checkPoint(ex.lat, ex.lng);
+      map.panTo({ lat: ex.lat, lng: ex.lng });
+    }
+
+    function renderExamples() {
+      const wrap = document.getElementById('examples');
+      wrap.innerHTML = '';
+      EXAMPLES.forEach(ex => {
+        const b = document.createElement('button');
+        b.textContent = ex.name;
+        b.title = `${ex.lat}, ${ex.lng}`;
+        b.addEventListener('click', () => loadExample(ex));
+        wrap.appendChild(b);
+      });
+    }
+
+    async function initMap() {
+      map = new google.maps.Map(document.getElementById('map'), {
+        center: { lat: 47.2, lng: 19.5 },
+        zoom: 6,
+        mapTypeControl: false,
+        streetViewControl: false,
+      });
+
+      // Allow setting the point by clicking the map.
+      map.addListener('click', (e) => {
+        const lat = e.latLng.lat();
+        const lng = e.latLng.lng();
+        document.getElementById('latInput').value = lat.toFixed(4);
+        document.getElementById('lngInput').value = lng.toFixed(4);
+        checkPoint(lat, lng);
+      });
+
+      document.getElementById('checkBtn').addEventListener('click', checkFromInputs);
+      ['latInput', 'lngInput'].forEach(id => {
+        document.getElementById(id).addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') checkFromInputs();
+        });
+      });
+
+      renderExamples();
+
+      try {
+        hungaryFeature = await loadHungaryGeoJson();
+      } catch (e) {
+        setResult('error', `Could not load Hungary boundary: ${e.message}.<br>Check your internet connection or replace the GeoJSON URL in this file.`);
+        return;
+      }
+
+      // Show Hungary's border on the map so the check is visually verifiable.
+      map.data.addGeoJson(hungaryFeature);
+      map.data.setStyle({
+        fillColor: '#4caf50',
+        fillOpacity: 0.12,
+        strokeColor: '#2e7d32',
+        strokeWeight: 2,
+      });
+
+      // Initial check with Budapest defaults.
+      checkFromInputs();
+    }
+
+    window.initMap = initMap;
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&callback=initMap&loading=async`;
+    s.async = true; s.defer = true;
+    document.head.appendChild(s);
+  </script>
+</body>
+</html>
