@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Car animation POC — Google Maps (Hungary)</title>
+
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { height: 100vh; width: 100vw; }
+
+    .controls {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 5;
+      background: white;
+      padding: 10px 12px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 180px;
+    }
+    .controls button {
+      padding: 6px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #f7f7f7;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .controls button:hover { background: #ececec; }
+    .controls label { font-size: 13px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .controls input[type=range] { flex: 1; }
+    .controls a { font-size: 12px; color: #2962ff; text-decoration: none; }
+
+    .api-warn {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #fafafa;
+      padding: 24px;
+      text-align: center;
+      z-index: 10;
+    }
+    .api-warn-box {
+      max-width: 520px;
+      background: white;
+      border: 1px solid #e0e0e0;
+      border-radius: 10px;
+      padding: 24px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .api-warn code {
+      background: #f3f3f3;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="controls">
+    <strong>Budapest → Debrecen</strong>
+    <button id="play">▶ Play</button>
+    <button id="reset">↺ Reset</button>
+    <label>
+      Speed
+      <input id="speed" type="range" min="0.5" max="5" step="0.5" value="1" />
+      <span id="speedLabel">1×</span>
+    </label>
+    <a href="index.html">← Leaflet/OSM version</a>
+  </div>
+
+  <script>
+    // ===========================================================
+    //  PUT YOUR GOOGLE MAPS API KEY HERE
+    //  How to get one: see README / instructions in the chat.
+    //  After adding the key, restrict it by HTTP referrer to your
+    //  GitHub Pages URL so others can't bill your project.
+    // ===========================================================
+    const GOOGLE_MAPS_API_KEY = 'AIzaSyB2566plXtC1Aedw8pyJw4qjw114x_QsSg';
+
+    // Fake route across Hungary: Budapest → Debrecen with waypoints.
+    const route = [
+      [47.4979, 19.0402], // Budapest
+      [47.4516, 19.5000],
+      [47.4000, 20.0000],
+      [47.4500, 20.5000],
+      [47.5000, 21.0000],
+      [47.5316, 21.6273], // Debrecen
+    ];
+
+    const SEGMENT_MS_BASE = 2500;
+    let map, carMarker;
+    let segmentIndex = 0;
+    let segmentStart = null;
+    let playing = false;
+    let speedMultiplier = 1;
+
+    function bearing(a, b) {
+      const toRad = d => d * Math.PI / 180;
+      const toDeg = r => r * 180 / Math.PI;
+      const lat1 = toRad(a[0]), lat2 = toRad(b[0]);
+      const dLng = toRad(b[1] - a[1]);
+      const y = Math.sin(dLng) * Math.cos(lat2);
+      const x = Math.cos(lat1) * Math.sin(lat2) -
+                Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+      // 0° = north, clockwise — matches Google Maps Symbol.rotation convention.
+      return (toDeg(Math.atan2(y, x)) + 360) % 360;
+    }
+
+    function lerp(a, b, t) {
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    }
+
+    // Car shape SVG path, pointing UP (north) when rotation = 0.
+    const CAR_PATH = 'M 0 -12 L 6 -8 L 6 8 L 4 12 L -4 12 L -6 8 L -6 -8 Z';
+
+    function initMap() {
+      map = new google.maps.Map(document.getElementById('map'), {
+        center: { lat: 47.5, lng: 20.3 },
+        zoom: 8,
+        mapTypeControl: false,
+        streetViewControl: false,
+      });
+
+      const path = route.map(([lat, lng]) => ({ lat, lng }));
+
+      new google.maps.Polyline({
+        path,
+        map,
+        strokeColor: '#2962ff',
+        strokeOpacity: 0.6,
+        strokeWeight: 4,
+      });
+
+      new google.maps.Marker({ position: path[0], map, label: 'A' });
+      new google.maps.Marker({ position: path[path.length - 1], map, label: 'B' });
+
+      const bounds = new google.maps.LatLngBounds();
+      path.forEach(p => bounds.extend(p));
+      map.fitBounds(bounds, 60);
+
+      carMarker = new google.maps.Marker({
+        position: path[0],
+        map,
+        icon: {
+          path: CAR_PATH,
+          fillColor: '#e53935',
+          fillOpacity: 1,
+          strokeColor: '#1a1a1a',
+          strokeWeight: 1,
+          scale: 1.2,
+          rotation: bearing(route[0], route[1]),
+          anchor: new google.maps.Point(0, 0),
+        },
+      });
+
+      document.getElementById('play').addEventListener('click', () => {
+        playing ? pause() : play();
+      });
+      document.getElementById('reset').addEventListener('click', reset);
+      document.getElementById('speed').addEventListener('input', (e) => {
+        speedMultiplier = parseFloat(e.target.value);
+        document.getElementById('speedLabel').textContent = speedMultiplier + '×';
+        if (playing) segmentStart = null;
+      });
+    }
+
+    function setCar(lat, lng, rotation) {
+      carMarker.setPosition({ lat, lng });
+      const icon = carMarker.getIcon();
+      icon.rotation = rotation;
+      carMarker.setIcon(icon);
+    }
+
+    function step(timestamp) {
+      if (!playing) return;
+      if (segmentStart === null) segmentStart = timestamp;
+
+      const a = route[segmentIndex];
+      const b = route[segmentIndex + 1];
+      const duration = SEGMENT_MS_BASE / speedMultiplier;
+      const t = Math.min((timestamp - segmentStart) / duration, 1);
+
+      const pos = lerp(a, b, t);
+      setCar(pos[0], pos[1], bearing(a, b));
+
+      if (t >= 1) {
+        segmentIndex++;
+        segmentStart = timestamp;
+        if (segmentIndex >= route.length - 1) {
+          playing = false;
+          document.getElementById('play').textContent = '▶ Play';
+          return;
+        }
+      }
+
+      requestAnimationFrame(step);
+    }
+
+    function play() {
+      if (segmentIndex >= route.length - 1) reset();
+      playing = true;
+      segmentStart = null;
+      document.getElementById('play').textContent = '⏸ Pause';
+      requestAnimationFrame(step);
+    }
+
+    function pause() {
+      playing = false;
+      document.getElementById('play').textContent = '▶ Play';
+    }
+
+    function reset() {
+      pause();
+      segmentIndex = 0;
+      segmentStart = null;
+      setCar(route[0][0], route[0][1], bearing(route[0], route[1]));
+    }
+
+    // --- Bootstrap ---
+    if (GOOGLE_MAPS_API_KEY === 'YOUR_API_KEY_HERE') {
+      const warn = document.createElement('div');
+      warn.className = 'api-warn';
+      warn.innerHTML = `
+        <div class="api-warn-box">
+          <h2>Google Maps API key missing</h2>
+          <p>Edit <code>google.html</code> and set:</p>
+          <p><code>const GOOGLE_MAPS_API_KEY = 'your-key-here';</code></p>
+          <p style="color:#666;font-size:13px;margin-top:18px">
+            Get a key at <a href="https://console.cloud.google.com/" target="_blank">console.cloud.google.com</a> — enable
+            the <em>Maps JavaScript API</em>, then restrict the key by HTTP referrer
+            to your GitHub Pages URL.
+          </p>
+          <p style="margin-top:18px"><a href="index.html">← Back to Leaflet/OSM version</a></p>
+        </div>`;
+      document.body.appendChild(warn);
+    } else {
+      window.initMap = initMap;
+      const script = document.createElement('script');
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&callback=initMap&loading=async`;
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
+    }
+  </script>
+</body>
+</html>
